@@ -1,0 +1,119 @@
+name: federated-km
+
+# Federated Kaplan-Meier: one coordinator + two independent hospital site
+# nodes, each with its own PostgreSQL database. Case-level data never leaves
+# the site services; only snapshot ids, death days and aggregate counts flow.
+
+services:
+  coordinator-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: coord
+      POSTGRES_PASSWORD: coord
+      POSTGRES_DB: coordinator
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coord -d coordinator"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - coord-data:/var/lib/postgresql/data
+
+  site-a-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sitea
+      POSTGRES_PASSWORD: sitea
+      POSTGRES_DB: site_a
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sitea -d site_a"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - site-a-data:/var/lib/postgresql/data
+
+  site-b-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: siteb
+      POSTGRES_PASSWORD: siteb
+      POSTGRES_DB: site_b
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U siteb -d site_b"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - site-b-data:/var/lib/postgresql/data
+
+  site-a:
+    build: ./site
+    environment:
+      SITE_ID: A
+      DATABASE_URL: postgresql+asyncpg://sitea:sitea@site-a-db:5432/site_a
+      SEED: A
+      SEED_CASES: "160"
+      RESPONSE_DELAY_SECONDS: "0"
+      SNAPSHOT_TTL_SECONDS: "300"
+    ports:
+      - "8001:8000"
+    depends_on:
+      site-a-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  site-b:
+    build: ./site
+    environment:
+      SITE_ID: B
+      DATABASE_URL: postgresql+asyncpg://siteb:siteb@site-b-db:5432/site_b
+      SEED: B
+      SEED_CASES: "140"
+      # Slow-hospital demo: every compute call takes 5s. Status queries and
+      # cancellation on the coordinator stay responsive regardless.
+      RESPONSE_DELAY_SECONDS: "5"
+      SNAPSHOT_TTL_SECONDS: "300"
+    ports:
+      - "8002:8000"
+    depends_on:
+      site-b-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  coordinator:
+    build: ./coordinator
+    environment:
+      DATABASE_URL: postgresql+asyncpg://coord:coord@coordinator-db:5432/coordinator
+      SITE_A_URL: http://site-a:8000
+      SITE_B_URL: http://site-b:8000
+      SITE_REQUEST_TIMEOUT: "30"
+    ports:
+      - "8000:8000"
+    depends_on:
+      coordinator-db:
+        condition: service_healthy
+      site-a:
+        condition: service_healthy
+      site-b:
+        condition: service_healthy
+    # Give in-flight rounds time to release both sites' snapshots on stop.
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  coord-data:
+  site-a-data:
+  site-b-data:
